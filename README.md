@@ -1,2 +1,123 @@
 # The-benefits-risks-energy-and-equity-of-low-altitude-logistics-in-China
 The repository contains the grid emission inventory data and analysis code used in "The benefits, risks, energy and equity of low altitude logistics in China" published by Xu et al. (2025) in Nature Cities.
+
+## Setup and Installation
+This implementation uses Python 3.9 and ArcGIS Pro.
+
+## Structure
+The code is built in PyCharm. Each notebook (script) contains a considerable part of the pipeline and is supported by 
+the core library provided in the notebooks/ or core/ directory. The input, output paths, and other configurations for 
+each notebook must be declared within the code.
+The scripts are divided into two categories:
+1.  **ArcPy Scripts:** Require an Esri ArcGIS installation (`arcpy`).
+2.  **Open-Source Scripts:** Use the standard Python scientific stack
+
+## Step.1 Geospatial Model Generation
+
+[Create_net.py] 
+* **Purpose:** Aggregates 24 hourly population CSVs into a single master risk grid (e.g., mesh_{city}.shp).
+* **Method:** Iteratively converts CSVs to points and uses arcpy.analy
+* **Output:** The master hourly risk grid, which is a critical input for Risk_and_Energy.py, Landusecategory.py, Assesscibility_for_county.py, Moran_and_LISA.py, and Polycentric.py.
+
+[Exposed_population_model.py] 
+* **Purpose:** Aggregates 24 hourly population CSVs into a single master risk grid (e.g., `mesh_{city}.shp`).
+* **Method:** Iteratively converts CSVs to points and uses `arcpy.analysis.SpatialJoin` with a `SUM` merge rule to accumulate population into 24 hourly columns (`value_00`...`value_23`).
+* **Output:** The master hourly risk grid, which is a **critical input** for `Risk_and_Energy.py`, `Landusecategory.py`, `Assesscibility_for_county.py`, `Moran_and_LISA.py`, and `Polycentric.py`.
+
+## Step.2 Core Metric Calculation
+[Risk_and_Energy.py]
+* **Purpose:** Calculates the total hourly **Risk** and **Energy Consumption** for a given line network (e.g., drone routes).
+* **Method:** Uses a 5-step ArcPy workflow:
+    1.  `Intersect` the network and the risk grid.
+    2.  `CalculateField` to get the length (in meters) of each segment.
+    3.  `SpatialJoin` back to the grid, using a `SUM` rule to get the total network `Length` in each cell.
+    4.  `CalculateField` in a loop to get hourly risk: `risk_i = value_i * Length`.
+    5.  Sums the total risk for all cells and applies a normalization index.
+* **Output:** A `risk_summary_grid.shp` containing 24 `risk_##` columns, and console output of the final normalized risk per hour.
+
+[Assesscibility.py]
+* **Purpose:** Calculates the overall **Accessibility Equity** for a city using a Gini coefficient.
+* **Method:**
+    1.  Calculates an accessibility score for each population grid cell: `Ratio = Population / Distance_to_Nearest_Station`.
+    2.  Uses `scipy.spatial.cKDTree` for efficient nearest-neighbor distance calculation.
+    3.  Calculates a single, population-weighted Gini coefficient for the entire city based on this ratio.
+* **Output:** A single Gini coefficient printed to the console.
+
+## Step.3 Advanced Analysis
+
+### RISK ###
+
+[Landusecategory.py]
+* **Purpose:** Summarizes the total hourly risk by land use category.
+* **Method:** Uses a complex, multi-stage ArcPy workflow involving two `Intersect` operations and one `SpatialJoin` to precisely allocate risk from the grid (`risk_00`...`risk_23`) to the underlying land use polygons.
+* **Output:** A `LandUse_Risk_Summary.csv` file with total risk summed for each land use class, for all 24 hours.
+
+[Building_intensity.py]
+* **Purpose:** A batch script to aggregate hourly risk by fine-grained building categories.
+* **Method:**
+    1.  Reads a `CItyList.csv` to iterate through cities.
+    2.  Uses `pyogrio` to read building data (`result.shp`).
+    3.  Categorizes each building by `Density` (e.g., `D1_[0-0.01)`) and `Hq` (e.g., `H1_<600`).
+    4.  Applies a city-specific scaling `factor` to all 24 `risk_##` columns.
+    5.  `groupby()` and `sum()` to get the total risk for each combined category (e.g., `D1_[0-0.01)_H1_<600`).
+* **Output:** A `Risk_By_Category.csv` file for each city.
+
+### ASSESSIBLITY ###
+
+[Assesscibility_for_county.py]
+* **Purpose:** Calculates the hourly Accessibility Equity (Gini) **for each administrative district**.
+* **Method:** Extends `Accessibility.py` by:
+    1.  Spatially joining grid cells to county polygons.
+    2.  Calculating the `Ratio = Population / Distance` for each of the 24 hourly population columns (`value_00`...`value_23`).
+    3.  Calculating a separate weighted Gini coefficient for each district, for each hour.
+* **Output:** A `fairness_by_district.csv` file detailing the hourly Gini, mean distance, and population for every district.
+
+[Moran_and_LISA.py]
+* **Purpose:** Identifies spatial clustering of accessibility using spatial autocorrelation.
+* **Method:**
+    1.  Calculates the accessibility score `S = Population / Distance`.
+    2.  Builds a spatial weights matrix (KNN).
+    3.  Performs **Global Moran's I** to test for overall spatial patterns.
+    4.  Performs **Local Moran's I (LISA)** to identify the location of significant clusters (High-High, Low-Low, etc.).
+* **Output:** `moran_global.csv` (Global I statistic), `moran_points.csv` (data for scatter plot), and `lisa_result.shp` (LISA cluster map).
+
+### ENERGY ###
+
+[Polycentric.py]
+* **Purpose:** A batch-processing script to identify urban centers and calculate polycentricity metrics for multiple cities.
+* **Method:**
+    1.  Reads a `citylist.csv` to iterate through cities.
+    2.  Loads the population grid (`mesh_{city}.shp`).
+    3.  Uses `scikit-learn` (`GMM` or `KMeans`) to perform weighted clustering on population data to find centers (K=1 to Kmax).
+    4.  Calculates a suite of metrics for each K: Gyration Radius (Rg), Rank-Size slope, Herfindahl Index (H), and dispersion.
+* **Output:** Four summary CSVs (e.g., `all_cities_bestK_metrics.csv`, `all_cities_bestK_centers.csv`) with all metrics and center locations (in Lon/Lat).
+
+[Urban_form.py]
+* **Purpose:** Conducts an econometric scaling analysis using log-identity decomposition.
+* **Method:**
+    1.  Assumes a relationship `p = T / G`.
+    2.  Fits two OLS regressions (e.g., `ln(T) ~ ln(S)` and `ln(G) ~ ln(S)`) using `statsmodels` to find scaling exponents `β_T` and `β_G`.
+    3.  Derives the exponent for the ratio: `β_p = β_T - β_G`.
+    4.  Also runs a sliding-window regression to see how `β_p` changes with scale `S`, with covariance-corrected confidence intervals.
+* **Output:** OLS summary tables, diagnostic plots, and a `_beta_p_trend_ci.csv` with the sliding window results.
+
+### TRADE-OFF ###
+
+[Q_value.py]
+* **Purpose:** A preprocessing tool for Geodetector to find the best way to discretize a continuous variable.
+* **Method:**
+    1.  Tests multiple discretization methods (e.g., `equal`, `quantile`, `geometric`, `sd`).
+    2.  Tests multiple interval counts (K) for each method.
+    3.  Calculates the **q-statistic** ($q = 1 - (SSW / SST)$) for every combination.
+    4.  Identifies the method and K-value that maximize `q`, i.e., the stratification that best explains the response variable.
+* **Output:** A heatmap plot and console output showing the best `q-value` and binning strategy.
+
+[Frontier.py]
+* **Purpose:** Conducts a 4-objective trade-off analysis for **Risk, Energy, Equity, and Potential (REQP)**.
+* **Method:**
+    1.  Normalizes all four objectives for minimization (e.g., `Potential` becomes `P_cost = 1 - P_norm`).
+    2.  Finds the **Pareto optimal frontier** (all non-dominated solutions).
+    3.  "Slims" the frontier for visualization using `epsilon-grid`, `crowding distance`, or `farthest point sampling`.
+    4.  Calculates the Euclidean distance to the frontier for all points.
+    5.  Runs an **ε-constraint** analysis to show the best achievable Equity/Potential for a given Risk/Energy budget.
+* **Output:** Multiple CSVs (`reqp_pareto_frontier_full.csv`, `reqp_tradeoff_epsilon.csv`, etc.) and a series of 2D/3D plots.
